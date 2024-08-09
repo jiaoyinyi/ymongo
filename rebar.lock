@@ -1,0 +1,12 @@
+[{<<"nbson">>,
+  {git,"https://github.com/nomasystems/nbson.git",
+       {ref,"40a8c1aeafa3a9811222ac69af617ee1497c7b74"}},
+  0},
+ {<<"pbkdf2">>,
+  {git,"https://github.com/emqx/erlang-pbkdf2.git",
+       {ref,"45d9981209ea07a83a58cf85aaf8236457da4342"}},
+  0},
+ {<<"poolboy">>,
+  {git,"https://github.com/devinus/poolboy.git",
+       {ref,"29be47db8c2be38b18c908e43a80ebb7b9b6116b"}},
+  0}].
