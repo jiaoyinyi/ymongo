@@ -38,7 +38,7 @@ do_connect(Host, Port, false, _) ->
 
 %% @doc 处理请求
 -spec request(#mongo_command{}, term(), #mongo_conn{}) -> #mongo_conn{}.
-request(Req0 = #mongo_command{db = Db0, type = Type}, From, Conn = #mongo_conn{db = Db, net_mod = NetMod, socket = Socket, reqs = Reqs}) ->
+request(Req0 = #mongo_command{db = Db0}, From, Conn = #mongo_conn{db = Db, net_mod = NetMod, socket = Socket, reqs = Reqs}) ->
     Req =
         case Db0 =:= undefined of
             true -> Req0#mongo_command{db = Db};
@@ -50,7 +50,7 @@ request(Req0 = #mongo_command{db = Db0, type = Type}, From, Conn = #mongo_conn{d
         {ok, Bin} ->
             ?MONGO_DFORMAT("发送请求，请求ID：~w，请求数据：~w，指令：~w，之前是否有该指令：~w", [ReqId, Req, Command, maps:is_key(ReqId, Reqs)]),
             ok = NetMod:send(Socket, Bin),
-            ReqState = #mongo_req_state{req_id = ReqId, from = From, type = Type},
+            ReqState = #mongo_req_state{req_id = ReqId, from = From},
             NewReqs = maps:put(ReqId, ReqState, Reqs),
             NewConn0 = Conn#mongo_conn{reqs = NewReqs},
             NewConn = need_hibernate(byte_size(Bin), NewConn0),
@@ -78,9 +78,9 @@ response([], Reqs) ->
     Reqs;
 response([{ResId, Res} | Ress], Reqs) ->
     case maps:find(ResId, Reqs) of
-        {ok, ReqState = #mongo_req_state{from = From}} ->
-            Reply = mongo_man:pack_reply(Res, ReqState),
-            ?MONGO_DFORMAT("响应请求，响应ID：~w，响应数据：~w，请求状态：~w，响应：~w", [ResId, Res, ReqState, Reply]),
+        {ok, _ReqState = #mongo_req_state{from = From}} ->
+            Reply = mongo_man:pack_reply(Res),
+            ?MONGO_DFORMAT("响应请求，响应ID：~w，响应数据：~w，请求状态：~w，响应：~w", [ResId, Res, _ReqState, Reply]),
             gen_server:reply(From, Reply),
             response(Ress, maps:remove(ResId, Reqs));
         error ->

@@ -30,7 +30,7 @@
 ]).
 -export([
     pack_command/1
-    , pack_reply/2
+    , pack_reply/1
 ]).
 
 -include("mongo.hrl").
@@ -49,7 +49,7 @@
 %% database => binary()
 %% login => binary() %% login name
 %% password => binary() %% login password
-%% auth_source => binary() %% auth from where database
+%% auth_source => binary() %% auth from which database
 %% }
 -spec connect(map()) -> {ok, pid()} | {error, term()}.
 connect(Opts) ->
@@ -64,19 +64,22 @@ close(ConnPid) ->
 -spec count(pid(), collection(), query(), map(), timeout()) -> {ok, integer()} | {error, term()}.
 count(Conn, Coll, Query, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"count">>, Coll}, {<<"query">>, Query}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_COUNT, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    case command(Conn, Cmd, Timeout) of
+        {ok, #{<<"n">> := Count}} ->
+            {ok, Count};
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 %% @doc 查找单个数据
 -spec find_one(pid(), collection(), filter(), projector(), map(), timeout()) -> {ok, document()} | {error, term()}.
 find_one(Conn, Coll, Filter, Projector, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"find">>, Coll}, {<<"filter">>, Filter}, {<<"projection">>, Projector}, {<<"limit">>, 1}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_FIND_ONE, cmd = Cmd},
-    case mongo_conn:request_api(Conn, Req, Timeout) of
-        {_, [Doc], _} ->
-            {ok, Doc};
-        {_, [], _} ->
+    case command(Conn, Cmd, Timeout) of
+        {ok, #{<<"cursor">> := #{<<"firstBatch">> := []}}} ->
             {error, not_found};
+        {ok, #{<<"cursor">> := #{<<"firstBatch">> := [Doc]}}} ->
+            {ok, Doc};
         {error, Reason} ->
             {error, Reason}
     end.
@@ -85,13 +88,13 @@ find_one(Conn, Coll, Filter, Projector, Opts, Timeout) ->
 -spec find_many(pid(), collection(), filter(), projector(), map(), timeout()) -> {ok, pid()} | {error, term()}.
 find_many(Conn, Coll, Filter, Projector, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"find">>, Coll}, {<<"filter">>, Filter}, {<<"projection">>, Projector}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_FIND_MANY, cmd = Cmd},
-    case mongo_conn:request_api(Conn, Req, Timeout) of
-        {CursorId, Batch = [_ | _], Db} ->
+    case command(Conn, Cmd, Timeout) of
+        {ok, #{<<"cursor">> := #{<<"firstBatch">> := []}}} ->
+            {error, not_found};
+        {ok, #{<<"cursor">> := #{<<"id">> := CursorId, <<"firstBatch">> := Batch, <<"ns">> := NS}}} ->
+            [Db, _] = binary:split(NS, <<".">>),
             BatchSize = maps:get(<<"batchSize">>, Opts, 50),
             mongo_cursor:start_link(Conn, Db, Coll, CursorId, BatchSize, Batch);
-        {_, [], _} ->
-            {error, not_found};
         {error, Reason} ->
             {error, Reason}
     end.
@@ -100,76 +103,66 @@ find_many(Conn, Coll, Filter, Projector, Opts, Timeout) ->
 -spec get_more(pid(), database(), collection(), integer(), integer(), timeout()) -> {integer(), documents()} | {error, term()}.
 get_more(Conn, Db, Coll, CursorId, BatchSize, Timeout) ->
     Cmd = [{<<"getMore">>, CursorId}, {<<"collection">>, Coll}, {<<"batchSize">>, BatchSize}],
-    Req = #mongo_command{db = Db, coll = Coll, type = ?MONGO_COMMAND_GET_MORE, cmd = Cmd},
-    case mongo_conn:request_api(Conn, Req, Timeout) of
+    case database_command(Conn, Db, Cmd, Timeout) of
+        {ok, #{<<"cursor">> := #{<<"id">> := NewCursorId, <<"nextBatch">> := Batch}}} ->
+            {NewCursorId, Batch};
         {error, Reason} ->
-            {error, Reason};
-        {NewCursorId, Batch, _} ->
-            {NewCursorId, Batch}
+            {error, Reason}
     end.
 
 %% @doc 关闭cursor
 -spec kill_cursor(pid(), database(), collection(), integer()) -> {ok, document()} | {error, term()}.
 kill_cursor(Conn, Db, Coll, CursorId) ->
     Cmd = [{<<"killCursors">>, Coll}, {<<"cursors">>, [CursorId]}],
-    Req = #mongo_command{db = Db, coll = Coll, type = ?MONGO_COMMAND_KILL_CURSORS, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req).
+    database_command(Conn, Db, Cmd, ?MONGO_DEF_TIMEOUT).
 
 %% @doc 插入单个数据
 -spec insert_one(pid(), collection(), document(), map(), timeout()) -> {ok, document()} | {error, term()}.
 insert_one(Conn, Coll, Doc, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"insert">>, Coll}, {<<"documents">>, [Doc]}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_INSERT_ONE, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 插入多个数据
 -spec insert_many(pid(), collection(), documents(), map(), timeout()) -> {ok, document()} | {error, term()}.
 insert_many(Conn, Coll, Docs, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"insert">>, Coll}, {<<"documents">>, Docs}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_INSERT_MANY, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 更新单个数据
 -spec update_one(pid(), collection(), filter(), update(), map(), map(), timeout()) -> {ok, document()} | {error, term()}.
 update_one(Conn, Coll, Filter, Update, UpdateOpts, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"update">>, Coll}, {<<"updates">>, [?MONGO_MERGE_OPT(#{<<"q">> => Filter, <<"u">> => Update, <<"multi">> => false}, UpdateOpts)]}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_UPDATE_ONE, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 更新多个数据
 -spec update_many(pid(), collection(), filter(), update(), map(), map(), timeout()) -> {ok, document()} | {error, term()}.
 update_many(Conn, Coll, Filter, Update, UpdateOpts, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"update">>, Coll}, {<<"updates">>, [?MONGO_MERGE_OPT(#{<<"q">> => Filter, <<"u">> => Update, <<"multi">> => true}, UpdateOpts)]}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_UPDATE_MANY, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 删除单个数据
 -spec delete_one(pid(), collection(), filter(), map(), map(), timeout()) -> {ok, document()} | {error, term()}.
 delete_one(Conn, Coll, Filter, DeleteOpts, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"delete">>, Coll}, {<<"deletes">>, [?MONGO_MERGE_OPT(#{<<"q">> => Filter, <<"limit">> => 1}, DeleteOpts)]}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_DELETE_ONE, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 删除多个数据
 -spec delete_many(pid(), collection(), filter(), map(), map(), timeout()) -> {ok, document()} | {error, term()}.
 delete_many(Conn, Coll, Filter, DeleteOpts, Opts, Timeout) ->
     Cmd = ?MONGO_MERGE_CMD([{<<"delete">>, Coll}, {<<"deletes">>, [?MONGO_MERGE_OPT(#{<<"q">> => Filter, <<"limit">> => 0}, DeleteOpts)]}], Opts),
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_DELETE_MANY, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 创建索引
 -spec create_index(pid(), collection(), indexes(), timeout()) -> {ok, document()} | {error, term()}.
 create_index(Conn, Coll, Indexes, Timeout) ->
     Cmd = [{<<"createIndexes">>, Coll}, {<<"indexes">>, mongo_util:ensure_list(Indexes)}],
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_CREATE_INDEX, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 移除索引
 -spec drop_index(pid(), collection(), index_name(), timeout()) -> {ok, document()} | {error, term()}.
 drop_index(Conn, Coll, Index, Timeout) ->
     Cmd = [{<<"dropIndexes">>, Coll}, {<<"index">>, Index}],
-    Req = #mongo_command{coll = Coll, type = ?MONGO_COMMAND_DROP_INDEX, cmd = Cmd},
-    mongo_conn:request_api(Conn, Req, Timeout).
+    command(Conn, Cmd, Timeout).
 
 %% @doc 其他指令
 -spec command(pid(), proplists:proplist(), timeout()) -> {ok, document()} | {error, term()}.
@@ -179,7 +172,7 @@ command(Conn, Command, Timeout) ->
 %% @doc 其他指定数据库指令
 -spec database_command(pid(), database(), proplists:proplist(), timeout()) -> {ok, document()} | {error, term()}.
 database_command(Conn, Db, Command, Timeout) ->
-    Req = #mongo_command{db = Db, type = ?MONGO_COMMAND_COMMAND, cmd = Command},
+    Req = #mongo_command{db = Db, cmd = Command},
     mongo_conn:request_api(Conn, Req, Timeout).
 
 %% @doc 打包指令
@@ -188,40 +181,8 @@ pack_command(#mongo_command{db = Db, cmd = Command}) ->
     Command ++ [{<<"$db">>, Db}].
 
 %% @doc 打包回复信息
--spec pack_reply(map(), #mongo_req_state{}) -> any().
-pack_reply(Res, #mongo_req_state{type = Type}) when Type =:= ?MONGO_COMMAND_FIND_ONE orelse Type =:= ?MONGO_COMMAND_FIND_MANY orelse Type =:= ?MONGO_COMMAND_GET_MORE ->
-    pack_read_reply(Res);
-pack_reply(Res, #mongo_req_state{type = ?MONGO_COMMAND_COUNT}) ->
-    pack_count_reply(Res);
-pack_reply(Res, #mongo_req_state{}) -> %% 其他，原样返回
-    pack_other_reply(Res).
-
-pack_read_reply(Res) ->
-    case maps:find(<<"cursor">>, Res) of
-        {ok, Cursor = #{<<"id">> := CursorId}} ->
-            Batch =
-                case maps:find(<<"firstBatch">>, Cursor) of
-                    {ok, Batch0} ->
-                        Batch0;
-                    _ ->
-                        maps:get(<<"nextBatch">>, Cursor)
-                end,
-            [Db, _] = binary:split(maps:get(<<"ns">>, Cursor), <<".">>),
-            {CursorId, Batch, Db};
-        _ ->
-            {0, [], undefined}
-    end.
-
-pack_count_reply(Res) ->
-    case maps:get(<<"ok">>, Res) == 1 of
-        true ->
-            N = maps:get(<<"n">>, Res),
-            {ok, N};
-        _ ->
-            pack_reply_err(Res)
-    end.
-
-pack_other_reply(Res) ->
+-spec pack_reply(map()) -> any().
+pack_reply(Res) ->
     case maps:get(<<"ok">>, Res) == 1 of
         true ->
             {ok, maps:remove(<<"ok">>, Res)};

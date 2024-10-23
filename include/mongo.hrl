@@ -76,7 +76,6 @@
 -record(mongo_req_state, {
     req_id                         :: integer()
     , from                         :: gen_server:from()
-    , type                         :: atom()
 }).
 
 %% @doc cursor进程状态
@@ -93,7 +92,6 @@
 -record(mongo_command, {
     db                              :: database()
     , coll                          :: collection()
-    , type                          :: atom()
     , cmd                           :: map() | tuple()
 }).
 
