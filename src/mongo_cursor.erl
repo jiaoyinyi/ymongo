@@ -81,9 +81,9 @@ foldl(Cursor, Fun, Acc, Max, Timeout) ->
 map(Fun, Cursor, Max) ->
     lists:reverse(foldl(fun(Doc, Acc) -> [Fun(Doc) | Acc] end, [], Cursor, Max)).
 
--spec stop(pid()) -> ok.
+-spec stop(pid()) -> ok | {error, term()}.
 stop(Cursor) ->
-    gen_server:call(Cursor, stop).
+    call(Cursor, stop, ?MONGO_CURSOR_DEF_TIMEOUT).
 
 %% 同步调用
 call(Cursor, Request, Timeout) ->
